@@ -1,0 +1,338 @@
+=--
+title: "R Code for Survival Analysis Models"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load the library "survival" which includes coxph() 
+
+Load a library for parametric regression; these are rarely used because Cox's semiparametric model is favored. 
+
+Example that contrasts (finds similarities) between CoxPH and Weibull using the pbc data
+Note: Weibull is the only model which is both a Proportional Hazards model and accelerated failure time model (i.e. log-linear model for time)
+
+```{r}
+library(survival)
+#install.packages("SurvRegCensCov")
+library(SurvRegCensCov)
+help(pbc)
+names(pbc)
+dead.tx <- pbc[,"status"] >= 1
+```
+
+# Univariable time-to-event models for hazard of death or transplant
+
+```{r}
+WeibullReg(Surv(time, dead.tx) ~ trt, data=pbc)
+summary(coxph(Surv(time, dead.tx) ~ trt, data=pbc))
+
+```
+
+Multivariable Weibull and Cox models
+Comment on the similarities and/or differences
+```{r}
+WeibullReg(Surv(time, dead.tx) ~ albumin + bili + chol + protime, data=pbc)
+
+summary(coxph(Surv(time, dead.tx) ~ albumin + bili + chol + protime, data=pbc))
+
+```
+
+
+Using pbc again, even more multivariable
+Including several covariates at once using a matrix
+As well as separately listed covariates
+```{r}
+Covar <- as.matrix(pbc[,7:20])
+summary(os <- coxph(Surv(time, dead.tx) ~ age + sex + Covar, data=pbc))
+#WeibullReg(Surv(time, dead.tx) ~ age + sex + Covar, data=pbc)
+
+```
+
+LASSO version of Cox
+LASSO is often used for model selection because the least important variables are assigned zero coefficients
+```{R}
+library(glmnet)
+female = pbc$sex == "f"
+X = cbind(age=pbc$age, female, Covar)
+Miss <- is.na(pbc$time) | is.na(dead.tx) | rowSums(is.na(X)) > 0
+o.cv <- cv.glmnet(y = Surv(pbc$time, dead.tx)[!Miss], x=X[!Miss, ], famil="cox")
+plot(o.cv)
+
+o <- glmnet(y = Surv(pbc$time, dead.tx)[!Miss], x=X[!Miss, ], family="cox")
+plot(o)
+
+# Coefficients at best penalty according to cross validated partial likelihood
+round(o$beta[,o$lambda==o.cv$lambda.min],4)
+# those that are nonzero
+dimnames(X)[[2]][o$beta[,o$lambda==o.cv$lambda.min] > 0]
+```
+
+
+Rescaling time axis makes no difference to coefficients and hazard ratios
+```{r}
+round(coef.1 <- summary(os <- coxph(Surv(time, dead.tx) ~ age + sex + Covar, data=pbc))$coef,3)
+
+Years <- pbc$time/365.25
+round(coef.2 <- summary(os <- coxph(Surv(Years, dead.tx) ~ age + sex + Covar, data=pbc))$coef,3)
+# Are both sets of coefficients the same?
+coef.1 == coef.2
+```
+
+
+Investigating Proportionality of Hazards for treatment effect
+```{r}
+# Look for proportional cumulative hazards
+plot(survfit(Surv(time, dead.tx) ~ trt, data=pbc), fun="cumhaz", lwd=3, col=2:3, mark.time=FALSE, main="Cumulative Hazard Estimate", xlab="Days")
+
+# Look for parallel log cumulative hazards
+plot(survfit(Surv(time, dead.tx) ~ trt, data=pbc), fun="cloglog", lwd=3, col=2:3, mark.time=FALSE, main="Log Cumulative Hazard", xlab="Days")
+```
+
+Investigating Proportionality of Hazards for the continuous variable, prothrombin time
+```{r}
+protime.3 <- cut(pbc[,"protime"], c(0,10,11,Inf))
+
+plot(survfit(Surv(time, dead.tx) ~ protime.3, data=pbc), fun="cloglog", lwd=3, col=2:4, mark.time=FALSE, main="Log Cumulative Hazard", xlab="Days")
+
+# Schoenfeld Residual test of proportionality
+summary(os <- coxph(Surv(time, dead.tx) ~ protime, data=pbc))
+(o.zph <- cox.zph(os))
+plot(o.zph$time, o.zph$y)
+```
+
+# Can test several at once
+```{r}
+summary(os <- coxph(Surv(time, dead.tx) ~ age + sex + protime, data=pbc))
+cox.zph(os)
+
+```
+
+Hazard Ratios stratified by time
+```{r}
+quantile(pbc[dead.tx==1,"time"], c(0.33,0.67))
+dead.tx.1 <- ifelse(pbc[,"time"]<800, dead.tx, 0)
+dead.tx.2 <- ifelse(pbc[,"time"]>=800 & pbc[,"time"]<1600, dead.tx, 0)
+dead.tx.3 <- ifelse(pbc[,"time"]>=1600, dead.tx, 0)
+summary(os1 <- coxph(Surv(time, dead.tx.1) ~ protime, data=pbc))$coef
+summary(os2 <- coxph(Surv(time, dead.tx.2) ~ protime, data=pbc))$coef
+summary(os3 <- coxph(Surv(time, dead.tx.3) ~ protime, data=pbc))$coef
+
+```
+
+
+Testing a categorical or ordinal variable, stage
+```{r}
+library(lmtest)
+summary(os1 <- coxph(Surv(time, dead.tx) ~ trt + age + sex, data=pbc))
+summary(os2 <- coxph(Surv(time, dead.tx) ~ trt + age + sex + stage, data=pbc))
+fstage <- factor(pbc$stage)
+summary(os3 <- coxph(Surv(time, dead.tx) ~ trt + age + sex + fstage, data=pbc))
+```
+
+# likelihood ratio test
+```{r}
+lrtest(os1, os3)
+# or
+anova(os3)
+
+```
+
+
+# Stratified baseline hzards: An interesting other way to stratify with Cox's model
+This approach avoids parameterization of the effect of the strata
+```{r}
+summary(os3 <- coxph(Surv(time, dead.tx) ~ trt + age + stage + sex, data=pbc))
+summary(os3 <- coxph(Surv(time, dead.tx) ~ trt + age + stage + strata(sex), data=pbc))
+
+summary(os3 <- coxph(Surv(time, dead.tx) ~ trt + age + sex + sex + strata(stage), data=pbc))
+
+```
+# Illustration of start stop
+```{r}
+?cgd
+table(cgd$id)
+plot(cgd$tstop, cgd$id, xlab=c(0,max(cgd$tstop)), pch=16)
+points(cgd$tstart, cgd$id, pch=16)
+for (i in unique(cgd$id)) {
+  df <- cgd[cgd$id==i,]
+  for (j in 1:dim(df)[1]) lines(c(df$tstart[j], df$tstop[j]), rep(i,2))
+}
+
+table(cgd$treat)
+coxph(Surv(tstart,tstop,status)~treat, data=cgd)
+
+```
+# Illustration of frailties: NOT for use for id
+```{r}
+coxph(Surv(tstart,tstop,status)~treat + frailty(center), data=cgd)
+coxph(Surv(tstart,tstop,status)~treat + cluster(center), data=cgd)
+
+```
+
+
+
+Investigating departures from (log)linear effects of continuous effects
+```{r}
+# is the effect of age on the hazard log-linear ?
+summary(osa <- coxph(Surv(time, dead.tx) ~ pspline(age, df=3), data=pbc))
+plot(pbc$age, predict(osa))
+
+# Can be multivariable
+summary(osa <- coxph(Surv(time, dead.tx) ~ pspline(age, df=3) + sex + protime, data=pbc))
+
+# is the effect of protime on the hazard log-linear ?
+summary(osp <- coxph(Surv(time, dead.tx) ~ pspline(protime, df=3) + sex, data=pbc))
+
+
+```
+
+
+Example of start-stop data, aka "counting process"
+```{r}
+help(heart)
+View(heart)
+(Surv.heart <- with(heart, Surv(time=start, time2=stop, event=event, type="counting")))
+summary(Surv.heart)
+summary(coxph(Surv.heart ~ age + year + transplant, data=heart))
+```
+
+
+
+
+Illustration that Hazards Cross Before the Survival Curves Cross
+```{r}
+par(mfcol=c(2,2))
+Time <- seq(from=0,to=(ULT<-3),length=1000)[-1]
+rho <- 0.25
+Haz0 <- Time^rho
+Haz1 <- Time^(-rho)
+plot(Time, Haz0, xlab="Time", main="Hazard", lwd=3, col=2, type="l", ylim=range(c(Haz0, Haz1)))
+lines(Time, Haz1, col=5)
+abline(v=1, lty=3)
+plot(Time, exp(-Time^(rho+1)/(rho+1)), xlab="Time", main="Survival", lwd=3, col=2, type="l")
+lines(Time, exp(-Time^(-rho+1)/(-rho+1)) , col=5)
+abline(v=1, lty=3)
+
+Haz0 <- Time^rho
+Haz1 <- (1/2)*Time^(-rho)
+plot(Time, Haz0, xlab="Time", main="Hazard", lwd=3, col=2, type="l")
+lines(Time, Haz1, col=5)
+abline(v=(1/2)^(1/(2*rho)), lty=3)
+plot(Time, exp(-Time^(rho+1)/(rho+1)), xlab="Time", main="Survival", lwd=3, col=2, type="l")
+lines(Time, exp(-(1/2)*Time^(-rho+1)/(-rho+1)) , col=5)
+abline(v=(1/2)^(1/(2*rho)), lty=3)
+```
+
+
+Hazard Ratio stratified by time
+Simulation of data with crossing hazards
+```{r}
+n <- 5000
+T0 <- rexp(n) / (BaselineHaz0<-0.5)
+CumHaz1 <- function(Time) {
+  BaselineHaz0 * (3*Time - 2.99*log(1+Time))
+  }
+inverse.f <- function(y, f) {
+  g <- function(x) {f(x)-y}
+  uniroot(g, lower=0, upper=10^8)
+  }
+T1 <- rep(NA, n)
+for (i in 1:n) 
+  T1[i] <- inverse.f(y=-log(runif(1)), f=CumHaz1)$root
+X <- runif(n) < 0.5
+Time <- ifelse(X, T1, T0)
+Censor <- runif(n)
+Censor <- Censor * quantile(Time/Censor, prop.events<-0.50)
+FUT <- pmin(Time, Censor)
+Event <- ifelse(Time < Censor, 1, 0)
+
+par(mfrow=c(1,1))
+plot(survfit(Surv(FUT, Event) ~ X), fun="event", lwd=3, col=2:3, ylab="Mortality", mark.time=FALSE, xlab="Time")
+
+X <- as.numeric(X)
+summary(coxph(Surv(FUT, Event) ~ X, robust=TRUE))$coef
+# HR Stratifed by followup time cut at 1 and 2
+summary(coxph(Surv(FUT, ifelse(FUT<1, Event, 0)) ~ X))$coef
+summary(coxph(Surv(FUT, ifelse(FUT>=1 & FUT<2, Event,0)) ~ X))$coef
+summary(coxph(Surv(FUT, ifelse(FUT>=2, Event, 0)) ~ X))$coef
+```
+
+
+
+
+# Illustration of Clustered (aka, MultiLevel) Data using simulated data
+```{r}
+n.cluster <- 100
+Cluster <- 1:n.cluster
+Frailty <- rnorm(n.cluster)
+n.per.cluster <- rpois(n.cluster, lambda=10)
+N <- sum(n.per.cluster)
+Cluster.ID <- rep(Cluster, times=n.per.cluster)
+Long.Frailty <- rep(Frailty, times=n.per.cluster)
+X1 <- rnorm(N)
+X2 <- rnorm(N)
+X3 <- rnorm(N)
+Hazard <- exp(1*X1 + 0*X2 + 0*X3 + 1.0*Long.Frailty)
+Time <- rexp(N) / Hazard
+Censor <- rexp(N)
+FUT <- pmin(Time, Censor)
+Event <- ifelse(Time < Censor, 1, 0)
+
+coxph(Surv(FUT, Event) ~ X1 + X2 + X3)
+coxph(Surv(FUT, Event) ~ X1 + X2 + X3 + frailty(Cluster.ID))
+coxph(Surv(FUT, Event) ~ X1 + X2 + X3 + cluster(Cluster.ID))
+```
+
+
+
+Illustration using simulated data
+```{r}
+n<-10000
+Z1 <- rnorm(n)
+Z2 <- rnorm(n)
+Z3 <- rnorm(n)
+X <- 0.5*Z1 + 0.2*Z2 + 0.0*Z3 + rnorm(n)
+HR <- exp(log(2)*X + -0.5*Z1 + 0.5*Z2 + 1*Z3)
+Time <- (rexp(n) / HR)^(1/3)
+Censor <- runif(n)
+Censor <- Censor * quantile(Time/Censor, q<-0.5)
+FUT <- pmin(Time, Censor)
+Event <- ifelse(Time < Censor, 1, 0)
+
+WeibullReg(Surv(FUT, Event) ~ X)
+coxph(Surv(FUT, Event) ~ X)
+
+WeibullReg(Surv(FUT, Event) ~ X+Z1+Z2+Z3)
+summary(coxph(Surv(FUT, Event) ~ X+Z1+Z2+Z3))
+
+```
+
+
+# Noncollapsibility 
+```{r}
+summary(coxph(Surv(FUT, Event) ~ X+Z1+Z2))$coef
+summary(coxph(Surv(FUT, Event) ~ X+Z1+Z2+Z3))$coef
+```
+
+
+
+
+
+
+# Competing risks: e.g. death and transplant compete with each other
+```{r}
+#install.packages("cmprsk")
+library(cmprsk)
+(ocr <- cuminc(pbc$time/365.25, pbc$status))
+plot(ocr)
+
+(okm <- survfit(Surv(pbc$time/365.25, pbc$status>0)~1))
+lines(okm$time, 1 - okm$surv, col=2, type="s")
+
+?crr
+
+
+```
