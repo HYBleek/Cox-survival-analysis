@@ -1,0 +1,476 @@
+## ----setup, include=FALSE----------------------------------------------------------------------------------------
+knitr::opts_chunk$set(echo = TRUE)
+
+
+## ----------------------------------------------------------------------------------------------------------------
+library(survival)
+library(SurvRegCensCov)
+library(flexsurv)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+
+heart_data <- read.csv("heart_failure_clinical_records_dataset.csv")
+head(heart_data) 
+
+
+## ----------------------------------------------------------------------------------------------------------------
+names(heart_data)
+
+## ----------------------------------------------------------------------------------------------------------------
+dead.tx <- heart_data[,"DEATH_EVENT"]
+
+
+## ----------------------------------------------------------------------------------------------------------------
+predictor_vars <- setdiff(names(heart_data), "DEATH_EVENT")
+for (var in predictor_vars) {
+  cat("=========================================\n")
+  cat("var：", var, "\n\n")
+  fmla <- as.formula(paste("Surv(time, dead.tx) ~", var))
+  # Weibull
+  cat("Weibull\n")
+  weib_fit <- WeibullReg(fmla, data = heart_data)
+  print(summary(weib_fit))
+  
+  # Cox
+  cat("Cox\n")
+  cox_fit <- coxph(fmla, data = heart_data)
+  print(summary(cox_fit))
+  
+  cat("=========================================\n\n")
+}
+
+
+## ----------------------------------------------------------------------------------------------------------------
+# List to hold combined plots for each variable
+plots_list <- list()
+
+predictor_single_vars <- setdiff(predictor_vars, "time")
+
+output_dir <- "single_variable_plots"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Loop over each predictor variable
+for (var in predictor_single_vars) {
+  # Create the survival formula
+  fmla <- as.formula(paste("Surv(time, dead.tx) ~", var))
+  
+  # Fit models: Weibull (using flexsurvreg) and Cox (using coxph)
+  weib_fit <- flexsurvreg(fmla, data = heart_data, dist = "weibull")
+  cox_fit  <- coxph(fmla, data = heart_data)
+  
+  # Choose representative values for the predictor using quantiles (25th, 50th, 75th)
+  var_quantiles <- quantile(heart_data[[var]], probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+  
+  # Create a grid of time points for predictions
+  time_grid <- seq(0, max(heart_data$time, na.rm = TRUE), length.out = 100)
+  
+  # Lists to hold predictions for each model
+  pred_list_weib <- list()
+  pred_list_cox  <- list()
+  
+  # Loop over each representative value
+  for (val in var_quantiles) {
+    # Prepare newdata with the current value; for a single predictor this is sufficient.
+    newdata <- data.frame(heart_data[1, , drop = FALSE])
+    newdata[[var]] <- val
+    
+    ## Weibull model predictions
+    # summary() returns a list; take the first element for the newdata row.
+    weib_summary <- summary(weib_fit, newdata = newdata, t = time_grid)[[1]]
+    pred_list_weib[[as.character(val)]] <- data.frame(
+      time = weib_summary$time,
+      surv = weib_summary$est,
+      Model = "Weibull",
+      Value = val
+    )
+    
+    ## Cox model predictions
+    surv_cox <- survfit(cox_fit, newdata = newdata)
+    pred_list_cox[[as.character(val)]] <- data.frame(
+      time = surv_cox$time,
+      surv = surv_cox$surv,
+      Model = "Cox",
+      Value = val
+    )
+  }
+  
+  # Combine predictions from both models
+  pred_df <- rbind(do.call(rbind, pred_list_weib),
+                   do.call(rbind, pred_list_cox))
+  
+  # Create the survival curves plot with ggplot2.
+  p <- ggplot(pred_df, aes(x = time, y = surv, color = factor(Value), linetype = Model)) +
+    geom_line(size = 1) +
+    labs(title = paste("Survival Curves for", var),
+         x = "Time",
+         y = "Survival Probability",
+         color = var,
+         linetype = "Model") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  # Extract the Cox model coefficients table
+  cox_summary <- summary(cox_fit)$coefficients
+  cox_table <- as.data.frame(cox_summary)
+  cox_table$Variable <- rownames(cox_table)
+  # Reorder columns for clarity
+  cox_table <- cox_table[, c("Variable", "coef", "exp(coef)", "se(coef)", "z", "Pr(>|z|)")]
+  
+  # Create a table grob for annotation
+  table_grob <- tableGrob(cox_table, rows = NULL)
+  
+  # Combine the survival plot and the coefficient table vertically.
+  # Adjust heights so that the plot takes more space.
+  combined_panel <- grid.arrange(p, table_grob, nrow = 2, heights = c(3, 1))
+  
+  # Save the combined panel in the list (using the variable name as the list key)
+  plots_list[[var]] <- combined_panel
+  # Define a file name for this predictor's plot
+  file_name <- file.path(output_dir, paste0(var, "_survival.png"))
+  # Save the plot as a PNG; adjust width and height as desired
+  ggsave(file_name, plot = combined_panel, width = 10, height = 6)
+}
+
+# Arrange all panels into one big figure.
+# Here we arrange them in two columns; adjust ncol as desired.
+do.call(grid.arrange, c(plots_list))
+         
+
+
+## ----------------------------------------------------------------------------------------------------------------
+cat("cox\n")
+cox_model <- coxph(Surv(time, DEATH_EVENT) ~ age + ejection_fraction + serum_creatinine + serum_sodium + high_blood_pressure + anaemia, data = heart_data)
+summary(cox_model)
+
+cat("WeiBull\n")
+weib_model <- WeibullReg(Surv(time, DEATH_EVENT) ~ age + ejection_fraction + serum_creatinine + serum_sodium + high_blood_pressure + anaemia, data = heart_data)
+weib_model
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+
+
+# Fit the Cox model using your specified covariates
+cox_model <- coxph(Surv(time, DEATH_EVENT) ~ age + ejection_fraction + serum_creatinine +
+                     serum_sodium + high_blood_pressure + anaemia, data = heart_data)
+cox_summary <- summary(cox_model)
+print(cox_summary)
+
+# Extract the coefficient table from the Cox model summary
+cox_coef <- as.data.frame(cox_summary$coefficients)
+cox_coef$Variable <- rownames(cox_coef)
+# Reorder columns to show the key statistics
+cox_coef <- cox_coef[, c("Variable", "coef", "exp(coef)", "se(coef)", "z", "Pr(>|z|)")]
+
+# Create a table grob for the Cox model coefficients
+cox_grob <- tableGrob(cox_coef, rows = NULL, 
+                      theme = ttheme_default(core = list(fg_params = list(cex = 0.8))))
+
+# Create a title for the plot
+title_grob <- textGrob("Cox Model Coefficient Summary", 
+                         gp = gpar(fontsize = 16, fontface = "bold"))
+
+# Combine the title and the coefficient table
+combined_plot <- grid.arrange(title_grob, cox_grob, ncol = 1, heights = c(0.2, 1))
+
+# Create an output folder if it doesn't exist
+output_dir <- "output_plots"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Save the combined plot to the output folder
+ggsave(filename = file.path(output_dir, "cox_model_coefficients.png"),
+       plot = combined_plot, width = 10, height = 4)
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+Covar <- as.matrix(heart_data[, c("ejection_fraction", "serum_creatinine", "high_blood_pressure")])
+cox_model <- coxph(Surv(time, DEATH_EVENT) ~ age + sex + Covar, data = heart_data)
+summary(cox_model)
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+library(glmnet)
+
+X <- as.matrix(heart_data[, predictor_single_vars])
+
+Y <- with(heart_data, Surv(time, DEATH_EVENT))
+
+non_na <- complete.cases(X, heart_data$time, heart_data$DEATH_EVENT)
+X_clean <- X[non_na, ]
+Y_clean <- Y[non_na]
+
+cv_fit <- cv.glmnet(x = X_clean, y = Y_clean, family = "cox")
+plot(cv_fit)
+cat("Best lambda:", cv_fit$lambda.min, "\n")
+
+lasso_fit <- glmnet(x = X_clean, y = Y_clean, family = "cox", lambda = cv_fit$lambda.min)
+print(summary(lasso_fit))
+
+lasso_coef <- coef(lasso_fit)
+print(lasso_coef)
+
+lasso_coef_mat <- as.matrix(coef(lasso_fit))
+selected_vars <- rownames(lasso_coef_mat)[lasso_coef_mat != 0]
+print(selected_vars)
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+names(heart_data)
+
+
+## ----------------------------------------------------------------------------------------------------------------
+# Load necessary library
+library(survival)
+
+# Assume the data frame 'heart_data' is already loaded and contains the following variables:
+# time, DEATH_EVENT, age, creatinine_phosphokinase, ejection_fraction, serum_creatinine, serum_sodium
+
+# Create output directory if it does not exist
+output_dir <- "single_variable_plots_check"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Define the list of continuous variables to check
+vars <- c("age", "creatinine_phosphokinase", "ejection_fraction", "serum_creatinine", "serum_sodium")
+
+# Loop through each variable
+for (var in vars) {
+  
+  # Create a new grouping variable name, e.g., age.grp
+  group_name <- paste0(var, ".grp")
+  
+  # Divide the variable into three groups based on quantiles (0%, 33%, 67%, 100%)
+  # and label the groups as "Low", "Medium", and "High"
+  heart_data[[group_name]] <- cut(heart_data[[var]],
+                                  breaks = quantile(heart_data[[var]], probs = c(0, 0.33, 0.67, 1), na.rm = TRUE),
+                                  include.lowest = TRUE,
+                                  labels = c("Low", "Medium", "High"))
+  
+  # Print the frequency table for the groups
+  cat("Grouping for variable", var, ":\n")
+  print(table(heart_data[[group_name]]))
+  
+  ## Plot survival curves for each group using the cloglog transformation (log cumulative hazard)
+  fit <- survfit(Surv(time, DEATH_EVENT) ~ heart_data[[group_name]], data = heart_data)
+  # Open PNG device for survival curve plot
+  surv_file <- file.path(output_dir, paste0(var, "_survival.png"))
+  png(filename = surv_file, width = 800, height = 600)
+  plot(fit, fun = "cloglog", lwd = 3, col = 2:4, mark.time = FALSE,
+       main = paste("Log Cumulative Hazard by", var),
+       xlab = "Days", ylab = "log(-log(Survival))")
+  legend("topleft", legend = levels(heart_data[[group_name]]), col = 2:4, lwd = 3)
+  dev.off()  # Close the PNG device
+  
+  ## Fit a univariate Cox proportional hazards model using the continuous variable
+  cox_model <- coxph(Surv(time, DEATH_EVENT) ~ heart_data[[var]], data = heart_data)
+  cat("\nCox model summary for", var, ":\n")
+  print(summary(cox_model))
+  
+  ## Perform the Schoenfeld residuals test for the Cox model
+  cox_zph <- cox.zph(cox_model)
+  cat("\nSchoenfeld residuals test for", var, ":\n")
+  print(cox_zph)
+  
+  ## Plot the Schoenfeld residuals
+  schoenfeld_file <- file.path(output_dir, paste0(var, "_schoenfeld.png"))
+  png(filename = schoenfeld_file, width = 800, height = 600)
+  plot(cox_zph, main = paste("Schoenfeld Residuals for", var))
+  dev.off()  # Close the PNG device
+  
+  # Separate the output for each variable in the console
+  cat("\n------------------------------------------------------\n")
+}
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+library(survival)
+library(lmtest)
+
+# Assuming the dataset is named heart_data
+# Define the variables to test
+variables <- c("anaemia", "diabetes", "sex", "smoking", "high_blood_pressure")
+
+# Loop through each variable
+for (v in variables) {
+  cat("============ Analysis for variable:", v, "============\n")
+  
+  # If a variable should be a factor (e.g., diabetes), convert it
+  if (v == "diabetes") {
+    heart_data[[v]] <- as.factor(heart_data[[v]])
+  }
+  
+  # Construct the formula dynamically: Surv(time, DEATH_EVENT) ~ variable
+  formula_str <- paste("Surv(time, DEATH_EVENT) ~", v)
+  model_formula <- as.formula(formula_str)
+  
+  # Fit the Cox model with the variable
+  model <- coxph(model_formula, data = heart_data)
+  
+  # Print the summary of the model
+  print(summary(model))
+  
+  # Fit the null model (only the intercept)
+  null_model <- coxph(Surv(time, DEATH_EVENT) ~ 1, data = heart_data)
+  
+  # Conduct the likelihood ratio test comparing the null model and the variable model
+  lr_result <- lrtest(null_model, model)
+  print(lr_result)
+  
+  cat("\n")
+}
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+
+# Assuming heart_data is already loaded in your R session
+
+# Add a patient ID column for plotting purposes
+heart_data$patient_id <- 1:nrow(heart_data)
+
+# Open a PNG device to save the plot
+png("patient_followup_plot.png", width = 800, height = 600)
+
+# Initialize an empty plot with appropriate x and y limits
+plot(NA, 
+     xlim = c(0, max(heart_data$time)), 
+     ylim = c(0, nrow(heart_data) + 1),
+     xlab = "Time", 
+     ylab = "Patient ID", 
+     main = "Patient Follow-up Duration")
+
+# Loop through each patient to plot the follow-up interval
+for(i in 1:nrow(heart_data)) {
+  # Draw a horizontal line from time 0 to the patient's follow-up time
+  segments(x0 = 0, y0 = heart_data$patient_id[i], 
+           x1 = heart_data$time[i], y1 = heart_data$patient_id[i])
+  
+  # Mark the starting point (time = 0) in blue
+  points(0, heart_data$patient_id[i], pch = 16, col = "blue")
+  
+  # Mark the ending point based on DEATH_EVENT:
+  # Red if the event occurred (DEATH_EVENT == 1), green if censored (DEATH_EVENT == 0)
+  if(heart_data$DEATH_EVENT[i] == 1) {
+    points(heart_data$time[i], heart_data$patient_id[i], pch = 16, col = "red")
+  } else {
+    points(heart_data$time[i], heart_data$patient_id[i], pch = 16, col = "green")
+  }
+}
+
+# Add a legend in the bottom right corner
+legend("bottomright", legend = c("Start", "Death Event", "Censored"),
+       col = c("blue", "red", "green"), pch = 16)
+
+# Close the PNG device to save the file
+dev.off()
+
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+
+
+# Define the categorical variables to be plotted
+category_vars <- c("anaemia", "diabetes", "sex", "smoking", "high_blood_pressure")
+
+# Create a survival object for the overall data
+surv_obj <- Surv(time = heart_data$time, event = heart_data$DEATH_EVENT)
+
+# Open a new plotting window and set up a 2x3 grid
+par(mfcol = c(2, 3), mar = c(4, 4, 2, 1))
+
+## Panel 1: Overall Survival Curve
+fit_overall <- survfit(surv_obj ~ 1, data = heart_data)
+plot(fit_overall,
+     main = "Overall Survival",
+     xlab = "Time",
+     ylab = "Survival Probability",
+     col = "black",
+     lwd = 2)
+
+## Panels 2-6: Survival Curves by Categorical Variables
+for (cat in category_vars) {
+  # Fit a survival curve stratified by the current categorical variable
+  fit_cat <- survfit(surv_obj ~ heart_data[[cat]], data = heart_data)
+  
+  # Plot the stratified survival curves
+  plot(fit_cat,
+       main = paste("Survival by", cat),
+       xlab = "Time",
+       ylab = "Survival Probability",
+       col = 1:length(unique(heart_data[[cat]])),
+       lwd = 2)
+  
+  # Add legend using the factor levels
+  legend("topright",
+         legend = levels(factor(heart_data[[cat]])),
+         col = 1:length(unique(heart_data[[cat]])),
+         lty = 1,
+         cex = 0.8)
+}
+
+
+
+
+## ----------------------------------------------------------------------------------------------------------------
+# Install package if necessary
+# install.packages("muhaz")
+library(muhaz)
+
+# Open a new plotting window and set up a 2x3 grid for hazards
+par(mfcol = c(2, 3), mar = c(4, 4, 2, 1))
+
+## Panel 1: Overall Hazard Function
+haz_overall <- muhaz(heart_data$time, heart_data$DEATH_EVENT)
+plot(haz_overall,
+     main = "Overall Hazard",
+     xlab = "Time",
+     ylab = "Hazard",
+     col = "black",
+     lwd = 2)
+
+## Panels 2-6: Hazard Functions by Categorical Variables
+for (cat in category_vars) {
+  # Define groups for the current categorical variable (assumed to have levels 0 and 1)
+  group0 <- heart_data[[cat]] == 0
+  group1 <- heart_data[[cat]] == 1
+  
+  # Estimate hazards for each group using kernel smoothing (muhaz)
+  haz0 <- muhaz(heart_data$time[group0], heart_data$DEATH_EVENT[group0])
+  haz1 <- muhaz(heart_data$time[group1], heart_data$DEATH_EVENT[group1])
+  
+  # Set a common y-axis range for the two groups
+  y_range <- range(c(haz0$haz, haz1$haz), na.rm = TRUE)
+  
+  # Plot hazard for group 0
+  plot(haz0,
+       main = paste("Hazard by", cat),
+       xlab = "Time",
+       ylab = "Hazard",
+       col = "red",
+       lwd = 2,
+       ylim = y_range)
+  
+  # Add hazard for group 1
+  lines(haz1, col = "blue", lwd = 2)
+  
+  # Add a legend to identify groups 0 and 1
+  legend("topright",
+         legend = c("0", "1"),
+         col = c("red", "blue"),
+         lty = 1,
+         cex = 0.8)
+}
+
+
