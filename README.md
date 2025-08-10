@@ -1,4 +1,4 @@
-* Cox-survival-analysis
+* Cox-survival-analysis *
 
 The analysis examines data from 299 heart failure patients, focusing on patient characteristics and mortality outcomes. The dataset includes 13 clinical features such as demographics, medical history, heart measurements, and blood test results.
 
